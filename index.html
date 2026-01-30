@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Interactive Shapefile Viewer & Web GIS Dashboard</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+<style>
+body { margin:0; font-family:Arial, sans-serif; background:#f4f4f4; }
+
+/* ===== HEADER ===== */
+#header {
+  background:#2c3e50;
+  color:#fff;
+  padding:20px 15px;
+  text-align:center;
+}
+#header h1 {
+  margin:0;
+  font-size:28px;
+}
+#header p {
+  margin:5px 0 0 0;
+  font-size:16px;
+  color:#ecf0f1;
+}
+
+/* ===== MAP ===== */
+#map { height:55vh; margin-top:0; }
+
+/* ===== UPLOAD BOX ===== */
+#uploadBox {
+  position:absolute;
+  top:20px;
+  left:15px;
+  background:#fff;
+  padding:10px;
+  border-radius:6px;
+  box-shadow:0 0 8px rgba(0,0,0,.3);
+  z-index:1000;
+  font-size:14px;
+}
+
+/* ===== ATTRIBUTE TABLE ===== */
+#tablePanel {
+  height:40vh;
+  border-top:2px solid #333;
+  overflow:auto;
+  display:none;
+  background:#fff;
+  padding:8px;
+}
+
+#controls {
+  display:flex;
+  gap:6px;
+  padding:6px 0;
+}
+
+#layerSelect, #searchBox, #downloadBtn {
+  padding:6px;
+  font-size:13px;
+}
+
+table {
+  border-collapse:collapse;
+  width:100%;
+  font-size:12px;
+}
+th, td {
+  border:1px solid #ccc;
+  padding:5px;
+}
+th {
+  background:#eee;
+  position:sticky;
+  top:0;
+}
+tr:hover { background:#d9ecff; cursor:pointer; }
+tr.active { background:#ffe082 !important; }
+tr.hidden { display:none; }
+
+/* ===== FOOTER ===== */
+#footer {
+  background:#2c3e50;
+  color:#fff;
+  text-align:center;
+  padding:10px;
+  font-size:14px;
+}
+</style>
+</head>
+
+<body>
+
+<!-- ===== HEADER ===== -->
+<div id="header">
+  <h1>Interactive Shapefile Viewer & Web GIS Dashboard</h1>
+  <p>Upload shapefiles, explore attributes, search & download data</p>
+</div>
+
+<!-- ===== UPLOAD BOX ===== -->
+<div id="uploadBox">
+  <input type="file" id="shpInput" multiple>
+  <div>Upload ZIP shapefiles</div>
+</div>
+
+<!-- ===== MAP ===== -->
+<div id="map"></div>
+
+<!-- ===== ATTRIBUTE TABLE ===== -->
+<div id="tablePanel">
+  <div id="controls">
+    <select id="layerSelect"></select>
+    <input id="searchBox" placeholder="Search attributes...">
+    <button id="downloadBtn">Download CSV</button>
+  </div>
+  <div id="tableContainer"></div>
+</div>
+
+<!-- ===== FOOTER ===== -->
+<div id="footer">
+  Mohammad Umar (PAICS-JKNMSHE)
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/shpjs@latest/dist/shp.min.js"></script>
+
+<script>
+/* ---------------- MAP ---------------- */
+const map = L.map('map').setView([34.08, 74.79], 7);
+
+const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+const satellite = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+);
+const terrain = L.tileLayer(
+  'https://stamen-tiles.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg'
+);
+
+L.control.layers(
+  { "OpenStreetMap": osm, "Satellite": satellite, "Terrain": terrain }
+).addTo(map);
+
+/* ---------------- GLOBAL STORE ---------------- */
+const layersData = {};
+let activeLayer = null;
+
+const highlightLayer = L.geoJSON(null,{
+  style:{ color:'yellow', weight:3, fillOpacity:0.6 }
+}).addTo(map);
+
+/* ---------------- COLORS ---------------- */
+const colors = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b'];
+let colorIndex = 0;
+
+/* ---------------- UPLOAD SHAPEFILES ---------------- */
+document.getElementById('shpInput').addEventListener('change', async e => {
+  for (let file of e.target.files) {
+    if (!file.name.endsWith('.zip')) continue;
+
+    const buffer = await file.arrayBuffer();
+    const layerName = file.name.replace('.zip','');
+    const color = colors[colorIndex++ % colors.length];
+
+    shp(buffer).then(geojson => {
+      geojson.features.forEach((f,i)=>f.__id=i);
+
+      const layer = L.geoJSON(geojson,{
+        style:{ color, weight:2, fillOpacity:0.4 },
+        onEachFeature:(f,l)=>{
+          l.on('click',()=>highlightRow(f.__id));
+        }
+      }).addTo(map);
+
+      layersData[layerName] = { layer, features: geojson.features };
+      addLayerOption(layerName);
+      showTable(layerName);
+
+      map.fitBounds(layer.getBounds());
+      document.getElementById('tablePanel').style.display='block';
+    });
+  }
+});
+
+/* ---------------- LAYER DROPDOWN ---------------- */
+function addLayerOption(name){
+  const sel = document.getElementById('layerSelect');
+  const opt = document.createElement('option');
+  opt.value = name;
+  opt.textContent = name;
+  sel.appendChild(opt);
+  sel.onchange = ()=>{
+    document.getElementById('searchBox').value='';
+    showTable(sel.value);
+  };
+}
+
+/* ---------------- ATTRIBUTE TABLE ---------------- */
+function showTable(name){
+  activeLayer = name;
+  highlightLayer.clearLayers();
+
+  const data = layersData[name].features;
+  const container = document.getElementById('tableContainer');
+  container.innerHTML='';
+
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const tr = document.createElement('tr');
+
+  Object.keys(data[0].properties).forEach(k=>{
+    const th = document.createElement('th');
+    th.textContent = k;
+    tr.appendChild(th);
+  });
+
+  thead.appendChild(tr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+
+  data.forEach(f=>{
+    const tr = document.createElement('tr');
+    tr.dataset.id = f.__id;
+
+    Object.values(f.properties).forEach(v=>{
+      const td = document.createElement('td');
+      td.textContent = v;
+      tr.appendChild(td);
+    });
+
+    tr.onclick = ()=>zoomToFeature(f.__id);
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+/* ---------------- SEARCH ---------------- */
+document.getElementById('searchBox').addEventListener('input', e=>{
+  const term = e.target.value.toLowerCase();
+  highlightLayer.clearLayers();
+
+  document.querySelectorAll('tbody tr').forEach(row=>{
+    const id = row.dataset.id;
+    const feature = layersData[activeLayer].features.find(f=>f.__id==id);
+
+    const match = Object.values(feature.properties)
+      .some(v => v?.toString().toLowerCase().includes(term));
+
+    row.classList.toggle('hidden', !match);
+
+    if(match && term){
+      highlightLayer.addData(feature);
+    }
+  });
+
+  if(term && highlightLayer.getLayers().length){
+    map.fitBounds(highlightLayer.getBounds());
+  }
+});
+
+/* ---------------- DOWNLOAD CSV ---------------- */
+document.getElementById('downloadBtn').addEventListener('click', ()=>{
+  if(!activeLayer) return;
+
+  const data = layersData[activeLayer].features;
+  const rows = [];
+  const headers = Object.keys(data[0].properties);
+  rows.push(headers.join(','));
+
+  document.querySelectorAll('tbody tr:not(.hidden)').forEach(row=>{
+    const rowData = [];
+    row.querySelectorAll('td').forEach(td=>{
+      let val = td.textContent.replace(/,/g,''); // remove commas
+      rowData.push(`"${val}"`);
+    });
+    rows.push(rowData.join(','));
+  });
+
+  const csvContent = "data:text/csv;charset=utf-8," + rows.join("\n");
+  const encodedUri = encodeURI(csvContent);
+  const link = document.createElement("a");
+  link.setAttribute("href", encodedUri);
+  link.setAttribute("download", `${activeLayer}_filtered.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+});
+
+/* ---------------- HELPERS ---------------- */
+function zoomToFeature(id){
+  const f = layersData[activeLayer].features.find(x=>x.__id==id);
+  const temp = L.geoJSON(f).addTo(map);
+  map.fitBounds(temp.getBounds());
+  setTimeout(()=>map.removeLayer(temp),500);
+  highlightRow(id);
+}
+
+function highlightRow(id){
+  document.querySelectorAll('tr').forEach(r=>r.classList.remove('active'));
+  const row = document.querySelector(`tr[data-id="${id}"]`);
+  if(row) row.classList.add('active');
+}
+</script>
+
+</body>
+</html>
